@@ -1,12 +1,12 @@
 import json
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
 import pytz
 import streamlit as st
 
-DATA_FILE = "engen_streamlit_data.json"
 JAPAN_TZ = pytz.timezone("Asia/Tokyo")
 
 DEFAULT_DATA = {
@@ -18,13 +18,25 @@ DEFAULT_DATA = {
 }
 
 
+# ---------- ユーザー処理 ----------
+def safe_username(name):
+    name = name.strip().lower()
+    name = re.sub(r"[^a-zA-Z0-9_\-ぁ-んァ-ン一-龥]", "_", name)
+    return name[:30]
+
+
+def get_data_file(username):
+    safe_name = safe_username(username)
+    return f"engen_data_{safe_name}.json"
+
+
 # ---------- データ処理 ----------
-def load_data():
-    if not os.path.exists(DATA_FILE):
+def load_data(data_file):
+    if not os.path.exists(data_file):
         return DEFAULT_DATA.copy()
 
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
+        with open(data_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         merged = DEFAULT_DATA.copy()
@@ -38,8 +50,8 @@ def load_data():
         return DEFAULT_DATA.copy()
 
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+def save_data(data, data_file):
+    with open(data_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -66,7 +78,6 @@ def ensure_today_record(data):
 def get_count(data, day):
     record = data["records"].get(day, {"count": 0})
 
-    # 昔のデータが数字だけで保存されていた場合にも対応
     if isinstance(record, int):
         return record
 
@@ -190,11 +201,11 @@ st.markdown(
     color: #d6d6e7;
     margin: 0;
 }
-.small-card {
+.user-box {
     background-color: #f6f6fb;
-    padding: 14px;
+    padding: 16px;
     border-radius: 16px;
-    margin: 8px 0;
+    margin-bottom: 20px;
 }
 </style>
 """,
@@ -202,15 +213,47 @@ st.markdown(
 )
 
 st.markdown('<div class="main-title">🚬 減煙アプリ</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-text">日本時間で記録する、スマホ対応の減煙メモ</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-text">ユーザーごとに記録を分けられる、スマホ対応の減煙メモ</div>', unsafe_allow_html=True)
+
+# ---------- ユーザー選択 ----------
+st.subheader("👤 ユーザー")
+
+query_user = st.query_params.get("user", "")
+if isinstance(query_user, list):
+    query_user = query_user[0]
+
+if "username" not in st.session_state:
+    st.session_state.username = safe_username(query_user) if query_user else ""
+
+username_input = st.text_input(
+    "使う人の名前を入力",
+    value=st.session_state.username,
+    placeholder="例: haruki / kanade",
+)
+
+username = safe_username(username_input)
+
+if not username:
+    st.warning("まずユーザー名を入力してね。入力した名前ごとに別々の記録になるよ。")
+    st.stop()
+
+if username != st.session_state.username:
+    st.session_state.username = username
+    st.query_params["user"] = username
+    if "data" in st.session_state:
+        del st.session_state.data
+    st.rerun()
+
+DATA_FILE = get_data_file(username)
+st.info(f"現在のユーザー: {username} / 保存ファイル: {DATA_FILE}")
 
 # ---------- 初期化 ----------
 if "data" not in st.session_state:
-    st.session_state.data = load_data()
+    st.session_state.data = load_data(DATA_FILE)
 
 data = st.session_state.data
 today = ensure_today_record(data)
-save_data(data)
+save_data(data, DATA_FILE)
 
 now_japan = get_japan_now()
 st.info(f"現在時刻（日本）: {now_japan.strftime('%Y年%m月%d日 %H:%M')}")
@@ -258,7 +301,7 @@ if submitted:
     data["target_cigs_per_day"] = int(target_cigs)
     data["pack_price"] = int(pack_price)
     data["cigs_per_pack"] = int(cigs_per_pack)
-    save_data(data)
+    save_data(data, DATA_FILE)
     st.success("設定を保存したよ")
     st.rerun()
 
@@ -309,17 +352,17 @@ col1, col2, col3 = st.columns(3)
 
 if col1.button("＋1本", use_container_width=True):
     set_count(data, today, today_stats["count"] + 1)
-    save_data(data)
+    save_data(data, DATA_FILE)
     st.rerun()
 
 if col2.button("−1本", use_container_width=True):
     set_count(data, today, today_stats["count"] - 1)
-    save_data(data)
+    save_data(data, DATA_FILE)
     st.rerun()
 
 if col3.button("今日を0本", use_container_width=True):
     set_count(data, today, 0)
-    save_data(data)
+    save_data(data, DATA_FILE)
     st.rerun()
 
 manual_count = st.number_input(
@@ -331,7 +374,7 @@ manual_count = st.number_input(
 
 if st.button("本数を反映", use_container_width=True):
     set_count(data, today, manual_count)
-    save_data(data)
+    save_data(data, DATA_FILE)
     st.success("本数を更新したよ")
     st.rerun()
 
@@ -349,4 +392,4 @@ if not df.empty:
 else:
     st.info("まだ履歴がないよ。今日から記録スタート。")
 
-st.caption("データは engen_streamlit_data.json に保存されるよ")
+st.caption("ユーザー名ごとに別々のJSONファイルへ保存されるよ")
