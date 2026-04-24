@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import hashlib
 from datetime import datetime
 
 import pandas as pd
@@ -10,6 +11,7 @@ import streamlit as st
 JAPAN_TZ = pytz.timezone("Asia/Tokyo")
 
 DEFAULT_DATA = {
+    "password_hash": "",
     "base_cigs_per_day": 20,
     "target_cigs_per_day": 10,
     "pack_price": 600,
@@ -28,6 +30,10 @@ def safe_username(name):
 def get_data_file(username):
     safe_name = safe_username(username)
     return f"engen_data_{safe_name}.json"
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 # ---------- データ処理 ----------
@@ -201,11 +207,11 @@ st.markdown(
     color: #d6d6e7;
     margin: 0;
 }
-.user-box {
+.login-card {
     background-color: #f6f6fb;
-    padding: 16px;
-    border-radius: 16px;
-    margin-bottom: 20px;
+    padding: 18px;
+    border-radius: 18px;
+    margin-bottom: 18px;
 }
 </style>
 """,
@@ -213,10 +219,10 @@ st.markdown(
 )
 
 st.markdown('<div class="main-title">🚬 減煙アプリ</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-text">ユーザーごとに記録を分けられる、スマホ対応の減煙メモ</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-text">ユーザー名と合言葉で記録を分ける、スマホ対応の減煙メモ</div>', unsafe_allow_html=True)
 
-# ---------- ユーザー選択 ----------
-st.subheader("👤 ユーザー")
+# ---------- ログイン ----------
+st.subheader("🔐 ログイン")
 
 query_user = st.query_params.get("user", "")
 if isinstance(query_user, list):
@@ -224,9 +230,13 @@ if isinstance(query_user, list):
 
 if "username" not in st.session_state:
     st.session_state.username = safe_username(query_user) if query_user else ""
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "data_file" not in st.session_state:
+    st.session_state.data_file = ""
 
 username_input = st.text_input(
-    "使う人の名前を入力",
+    "ユーザー名",
     value=st.session_state.username,
     placeholder="例: yuto / takahide",
 )
@@ -234,18 +244,68 @@ username_input = st.text_input(
 username = safe_username(username_input)
 
 if not username:
-    st.warning("まずユーザー名を入力してね。入力した名前ごとに別々の記録になるよ。")
+    st.warning("まずユーザー名を入力してね。")
     st.stop()
+
+DATA_FILE = get_data_file(username)
+login_data = load_data(DATA_FILE)
+is_new_user = not os.path.exists(DATA_FILE) or login_data.get("password_hash", "") == ""
 
 if username != st.session_state.username:
     st.session_state.username = username
-    st.query_params["user"] = username
+    st.session_state.authenticated = False
+    st.session_state.data_file = DATA_FILE
     if "data" in st.session_state:
         del st.session_state.data
+    st.query_params["user"] = username
     st.rerun()
 
-DATA_FILE = get_data_file(username)
-st.info(f"現在のユーザー: {username} / 保存ファイル: {DATA_FILE}")
+st.markdown('<div class="login-card">', unsafe_allow_html=True)
+
+if is_new_user:
+    st.info("このユーザー名は初めて使われます。合言葉を登録してください。")
+    new_password = st.text_input("登録する合言葉", type="password")
+    new_password_confirm = st.text_input("合言葉をもう一度入力", type="password")
+
+    if st.button("新規登録して始める", use_container_width=True):
+        if len(new_password) < 3:
+            st.error("合言葉は3文字以上にしてね。")
+            st.stop()
+        if new_password != new_password_confirm:
+            st.error("合言葉が一致してないよ。")
+            st.stop()
+
+        login_data["password_hash"] = hash_password(new_password)
+        save_data(login_data, DATA_FILE)
+
+        st.session_state.authenticated = True
+        st.session_state.username = username
+        st.session_state.data_file = DATA_FILE
+        st.session_state.data = login_data
+        st.query_params["user"] = username
+        st.success("登録できたよ")
+        st.rerun()
+else:
+    password = st.text_input("合言葉", type="password")
+
+    if st.button("ログイン", use_container_width=True):
+        if hash_password(password) == login_data.get("password_hash", ""):
+            st.session_state.authenticated = True
+            st.session_state.username = username
+            st.session_state.data_file = DATA_FILE
+            st.session_state.data = login_data
+            st.query_params["user"] = username
+            st.success("ログインできたよ")
+            st.rerun()
+        else:
+            st.error("合言葉が違うよ。")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+if not st.session_state.authenticated:
+    st.stop()
+
+DATA_FILE = st.session_state.data_file
 
 # ---------- 初期化 ----------
 if "data" not in st.session_state:
@@ -254,6 +314,13 @@ if "data" not in st.session_state:
 data = st.session_state.data
 today = ensure_today_record(data)
 save_data(data, DATA_FILE)
+
+st.success(f"ログイン中: {st.session_state.username}")
+if st.button("ログアウト"):
+    st.session_state.authenticated = False
+    if "data" in st.session_state:
+        del st.session_state.data
+    st.rerun()
 
 now_japan = get_japan_now()
 st.info(f"現在時刻（日本）: {now_japan.strftime('%Y年%m月%d日 %H:%M')}")
@@ -392,4 +459,4 @@ if not df.empty:
 else:
     st.info("まだ履歴がないよ。今日から記録スタート。")
 
-st.caption("ユーザー名ごとに別々のJSONファイルへ保存されるよ")
+st.caption("ユーザー名と合言葉ごとに記録を分けて保存されるよ")
