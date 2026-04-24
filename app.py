@@ -228,7 +228,7 @@ if "username" not in st.session_state:
 username_input = st.text_input(
     "使う人の名前を入力",
     value=st.session_state.username,
-    placeholder="例: haruki / kanade",
+    placeholder="例: yuto / takahide",
 )
 
 username = safe_username(username_input)
