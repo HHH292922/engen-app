@@ -1,11 +1,13 @@
 import json
 import os
-from datetime import date, datetime
+from datetime import datetime
 
 import pandas as pd
+import pytz
 import streamlit as st
 
 DATA_FILE = "engen_streamlit_data.json"
+JAPAN_TZ = pytz.timezone("Asia/Tokyo")
 
 DEFAULT_DATA = {
     "base_cigs_per_day": 20,
@@ -24,14 +26,16 @@ def load_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
         merged = DEFAULT_DATA.copy()
         merged.update(data)
+
         if "records" not in merged or not isinstance(merged["records"], dict):
             merged["records"] = {}
+
         return merged
     except Exception:
         return DEFAULT_DATA.copy()
-
 
 
 def save_data(data):
@@ -39,71 +43,87 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def get_japan_now():
+    return datetime.now(JAPAN_TZ)
+
 
 def get_today_str():
-    return date.today().isoformat()
-
+    return get_japan_now().strftime("%Y-%m-%d")
 
 
 def ensure_today_record(data):
     today = get_today_str()
+
     if today not in data["records"]:
         data["records"][today] = {
             "count": 0,
-            "manual_saved_override": None,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": get_japan_now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
     return today
 
 
+def get_count(data, day):
+    record = data["records"].get(day, {"count": 0})
+
+    # 昔のデータが数字だけで保存されていた場合にも対応
+    if isinstance(record, int):
+        return record
+
+    return int(record.get("count", 0))
+
+
+def set_count(data, day, count):
+    if day not in data["records"] or isinstance(data["records"].get(day), int):
+        data["records"][day] = {
+            "count": 0,
+            "updated_at": get_japan_now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    data["records"][day]["count"] = max(int(count), 0)
+    data["records"][day]["updated_at"] = get_japan_now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def one_cig_price(data):
-    cigs_per_pack = data.get("cigs_per_pack", 20)
+    cigs_per_pack = int(data.get("cigs_per_pack", 20))
     if cigs_per_pack <= 0:
         return 0
-    return data.get("pack_price", 0) / cigs_per_pack
+    return float(data.get("pack_price", 0)) / cigs_per_pack
 
 
-
-def calculate_day_stats(data, day_str):
-    record = data["records"].get(day_str, {"count": 0, "manual_saved_override": None})
-    count = int(record.get("count", 0))
-    one_price = one_cig_price(data)
+def calculate_day_stats(data, day):
+    count = get_count(data, day)
+    price = one_cig_price(data)
     base = int(data.get("base_cigs_per_day", 0))
     target = int(data.get("target_cigs_per_day", 0))
 
-    today_cost = count * one_price
-    base_cost = base * one_price
-    target_cost = target * one_price
-    saved_vs_base = max(base_cost - today_cost, 0)
-    current_cig_cost = count * one_price
-    remaining_to_target = max(target - count, 0)
-    over_target = max(count - target, 0)
+    actual_cost = count * price
+    base_cost = base * price
+    saved = max(base_cost - actual_cost, 0)
+    remaining = max(target - count, 0)
+    over = max(count - target, 0)
 
     return {
         "count": count,
-        "one_price": one_price,
-        "today_cost": today_cost,
+        "one_price": price,
+        "actual_cost": actual_cost,
         "base_cost": base_cost,
-        "target_cost": target_cost,
-        "saved_vs_base": saved_vs_base,
-        "current_cig_cost": current_cig_cost,
-        "remaining_to_target": remaining_to_target,
-        "over_target": over_target,
+        "saved": saved,
+        "remaining": remaining,
+        "over": over,
     }
 
 
-
-def calculate_totals(data):
+def calculate_total_stats(data):
     total_count = 0
-    total_cost = 0.0
-    total_saved = 0.0
+    total_cost = 0
+    total_saved = 0
 
-    for day_str in data["records"]:
-        stats = calculate_day_stats(data, day_str)
+    for day in data["records"]:
+        stats = calculate_day_stats(data, day)
         total_count += stats["count"]
-        total_cost += stats["today_cost"]
-        total_saved += stats["saved_vs_base"]
+        total_cost += stats["actual_cost"]
+        total_saved += stats["saved"]
 
     return {
         "total_count": total_count,
@@ -112,35 +132,79 @@ def calculate_totals(data):
     }
 
 
-
 def make_history_df(data):
     rows = []
-    for day_str in sorted(data["records"].keys()):
-        stats = calculate_day_stats(data, day_str)
+
+    for day in sorted(data["records"].keys()):
+        stats = calculate_day_stats(data, day)
         rows.append(
             {
-                "日付": day_str,
+                "日付": day,
                 "吸った本数": stats["count"],
-                "使った金額": round(stats["today_cost"], 1),
-                "元のペースなら": round(stats["base_cost"], 1),
-                "節約額": round(stats["saved_vs_base"], 1),
+                "使った金額": round(stats["actual_cost"], 1),
+                "節約額": round(stats["saved"], 1),
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=["日付", "吸った本数", "使った金額", "元のペースなら", "節約額"])
+        return pd.DataFrame(columns=["日付", "吸った本数", "使った金額", "節約額"])
 
     df = pd.DataFrame(rows)
     df["日付"] = pd.to_datetime(df["日付"])
-    df = df.sort_values("日付")
-    return df
+    return df.sort_values("日付")
 
 
-# ---------- 画面 ----------
-st.set_page_config(page_title="減煙アプリ", page_icon="🚬", layout="centered")
-st.title("🚬 減煙アプリ")
-st.caption("スマホでも操作できる、自分用の減煙記録アプリ")
+# ---------- 画面設定 ----------
+st.set_page_config(
+    page_title="減煙アプリ",
+    page_icon="🚬",
+    layout="centered",
+)
 
+st.markdown(
+    """
+<style>
+.main-title {
+    font-size: 34px;
+    font-weight: 800;
+    margin-bottom: 4px;
+}
+.sub-text {
+    color: #777;
+    margin-bottom: 20px;
+}
+.big-card {
+    background: linear-gradient(135deg, #232946, #121629);
+    padding: 24px;
+    border-radius: 20px;
+    color: white;
+    text-align: center;
+    margin: 12px 0 20px 0;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+}
+.big-card h1 {
+    font-size: 44px;
+    margin: 6px 0;
+}
+.big-card p {
+    color: #d6d6e7;
+    margin: 0;
+}
+.small-card {
+    background-color: #f6f6fb;
+    padding: 14px;
+    border-radius: 16px;
+    margin: 8px 0;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown('<div class="main-title">🚬 減煙アプリ</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-text">日本時間で記録する、スマホ対応の減煙メモ</div>', unsafe_allow_html=True)
+
+# ---------- 初期化 ----------
 if "data" not in st.session_state:
     st.session_state.data = load_data()
 
@@ -148,121 +212,131 @@ data = st.session_state.data
 today = ensure_today_record(data)
 save_data(data)
 
-# ---------- 基本設定 ----------
-st.subheader("基本設定")
-with st.form("settings_form"):
-    base_cigs = st.number_input(
-        "元々1日に吸っていた本数",
-        min_value=0,
-        value=int(data.get("base_cigs_per_day", 20)),
-        step=1,
-    )
-    target_cigs = st.number_input(
-        "今の目標本数（1日）",
-        min_value=0,
-        value=int(data.get("target_cigs_per_day", 10)),
-        step=1,
-    )
-    pack_price = st.number_input(
-        "1箱の値段（円）",
-        min_value=0.0,
-        value=float(data.get("pack_price", 600)),
-        step=10.0,
-    )
-    cigs_per_pack = st.number_input(
-        "1箱の本数",
-        min_value=1,
-        value=int(data.get("cigs_per_pack", 20)),
-        step=1,
-    )
-    settings_submit = st.form_submit_button("設定を保存")
+now_japan = get_japan_now()
+st.info(f"現在時刻（日本）: {now_japan.strftime('%Y年%m月%d日 %H:%M')}")
 
-if settings_submit:
+# ---------- 設定 ----------
+st.subheader("⚙️ 設定")
+
+with st.form("settings_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        base_cigs = st.number_input(
+            "元々1日に吸っていた本数",
+            min_value=0,
+            value=int(data.get("base_cigs_per_day", 20)),
+            step=1,
+        )
+    with col2:
+        target_cigs = st.number_input(
+            "今の目標本数",
+            min_value=0,
+            value=int(data.get("target_cigs_per_day", 10)),
+            step=1,
+        )
+
+    col3, col4 = st.columns(2)
+    with col3:
+        pack_price = st.number_input(
+            "1箱の値段（円）",
+            min_value=0,
+            value=int(data.get("pack_price", 600)),
+            step=10,
+        )
+    with col4:
+        cigs_per_pack = st.number_input(
+            "1箱の本数",
+            min_value=1,
+            value=int(data.get("cigs_per_pack", 20)),
+            step=1,
+        )
+
+    submitted = st.form_submit_button("設定を保存")
+
+if submitted:
     data["base_cigs_per_day"] = int(base_cigs)
     data["target_cigs_per_day"] = int(target_cigs)
-    data["pack_price"] = float(pack_price)
+    data["pack_price"] = int(pack_price)
     data["cigs_per_pack"] = int(cigs_per_pack)
     save_data(data)
     st.success("設定を保存したよ")
+    st.rerun()
 
 # ---------- 今日の状態 ----------
-st.subheader("今日の状態")
-st.write(f"日付: {today}")
+st.subheader("📅 今日の状態")
+st.caption(f"今日の日付: {today}")
 
 today_stats = calculate_day_stats(data, today)
 
 col1, col2 = st.columns(2)
-col3, col4 = st.columns(2)
-
 col1.metric("今日吸った本数", f"{today_stats['count']}本")
 col2.metric("1本あたり", f"{today_stats['one_price']:.1f}円")
-col3.metric("今日使った金額", f"{today_stats['today_cost']:.1f}円")
-col4.metric("今日の節約額", f"{today_stats['saved_vs_base']:.1f}円")
+
+col3, col4 = st.columns(2)
+col3.metric("今日使った金額", f"{today_stats['actual_cost']:.0f}円")
+col4.metric("今日の節約額", f"{today_stats['saved']:.0f}円")
 
 col5, col6 = st.columns(2)
-col7, col8 = st.columns(2)
-col5.metric("今吸ったタバコで", f"{today_stats['current_cig_cost']:.1f}円目")
-col6.metric("元のペースなら", f"{today_stats['base_cost']:.1f}円")
-col7.metric("目標まで残り", f"{today_stats['remaining_to_target']}本")
-col8.metric("目標超過", f"{today_stats['over_target']}本")
+col5.metric("目標まで残り", f"{today_stats['remaining']}本")
+col6.metric("目標超過", f"{today_stats['over']}本")
 
 if today_stats["count"] == 0:
-    st.info("まだ今日は吸ってないね。いいスタート。")
-elif today_stats["count"] <= data["target_cigs_per_day"]:
+    st.success("今日はまだ0本。めっちゃいいスタート。")
+elif today_stats["over"] == 0:
     st.success("目標ペース内。かなりいい感じ。")
 else:
-    st.warning("今日は目標を超えてる。次の1本を少しだけ遅らせてみよう。")
+    st.warning("目標を超えてる。次の1本を少し遅らせてみよう。")
 
-# ---------- 操作ボタン ----------
-st.subheader("操作")
-button_col1, button_col2, button_col3 = st.columns(3)
+# ---------- 累計 ----------
+st.subheader("💰 継続の成果")
+total_stats = calculate_total_stats(data)
 
-if button_col1.button("吸った", use_container_width=True):
-    data["records"][today]["count"] += 1
-    data["records"][today]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+st.markdown(
+    f"""
+<div class="big-card">
+    <p>これまでに節約できた金額</p>
+    <h1>{total_stats['total_saved']:.0f}円</h1>
+    <p>累計 {total_stats['total_count']}本 / 使用額 {total_stats['total_cost']:.0f}円</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------- 操作 ----------
+st.subheader("🕹️ 操作")
+
+col1, col2, col3 = st.columns(3)
+
+if col1.button("＋1本", use_container_width=True):
+    set_count(data, today, today_stats["count"] + 1)
     save_data(data)
     st.rerun()
 
-if button_col2.button("1本取り消し", use_container_width=True):
-    if data["records"][today]["count"] > 0:
-        data["records"][today]["count"] -= 1
-        data["records"][today]["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        save_data(data)
-    st.rerun()
-
-if button_col3.button("今日を0本にする", use_container_width=True):
-    data["records"][today]["count"] = 0
-    data["records"][today]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+if col2.button("−1本", use_container_width=True):
+    set_count(data, today, today_stats["count"] - 1)
     save_data(data)
     st.rerun()
 
-# ---------- 手動入力 ----------
-st.subheader("今日の本数を直接入力")
+if col3.button("今日を0本", use_container_width=True):
+    set_count(data, today, 0)
+    save_data(data)
+    st.rerun()
+
 manual_count = st.number_input(
-    "今日吸った本数",
+    "今日の本数を直接入力",
     min_value=0,
-    value=int(data["records"][today]["count"]),
+    value=int(today_stats["count"]),
     step=1,
 )
 
-if st.button("本数を反映"):
-    data["records"][today]["count"] = int(manual_count)
-    data["records"][today]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+if st.button("本数を反映", use_container_width=True):
+    set_count(data, today, manual_count)
     save_data(data)
-    st.success("今日の本数を更新したよ")
+    st.success("本数を更新したよ")
     st.rerun()
 
-# ---------- 累計 ----------
-st.subheader("累計")
-totals = calculate_totals(data)
-
-total_col1, total_col2, total_col3 = st.columns(3)
-total_col1.metric("累計本数", f"{totals['total_count']}本")
-total_col2.metric("累計使用額", f"{totals['total_cost']:.1f}円")
-total_col3.metric("累計節約額", f"{totals['total_saved']:.1f}円")
-
 # ---------- 履歴とグラフ ----------
-st.subheader("履歴")
+st.subheader("📈 履歴とグラフ")
 df = make_history_df(data)
 
 if not df.empty:
@@ -270,22 +344,9 @@ if not df.empty:
     show_df["日付"] = show_df["日付"].dt.strftime("%Y-%m-%d")
     st.dataframe(show_df, use_container_width=True, hide_index=True)
 
-    st.subheader("グラフ")
     chart_df = df.set_index("日付")[["吸った本数", "節約額"]]
     st.line_chart(chart_df)
-
-    st.bar_chart(df.set_index("日付")[["吸った本数"]])
 else:
-    st.info("まだ履歴がないよ。今日の記録から始めよう。")
+    st.info("まだ履歴がないよ。今日から記録スタート。")
 
-# ---------- 外でも使うための説明 ----------
-st.subheader("外でも使いたいとき")
-st.markdown(
-    """
-- 今のままでも、**Macを起動していて同じWi-Fi**ならスマホで使える
-- **スマホ単体でどこでも使いたい**なら、Render か Streamlit Community Cloud に公開する
-- 公開すれば、SafariでURLを開くだけで使えるようになる
-"""
-)
-
-st.caption("データは app.py と同じフォルダの engen_streamlit_data.json に保存されるよ")
+st.caption("データは engen_streamlit_data.json に保存されるよ")
